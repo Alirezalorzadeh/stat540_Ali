@@ -196,38 +196,4 @@ axis(1, 1:nmethod, colnames(pr.err))
 box()
 ```
 
-```{r}
-yhat.knn <- knn(train = t(trainDat), test = t(testDat), cl = train.es$LnStatus, 
-    k = 10)
 
-pr.errTest <- mean(test.es$LnStatus != yhat.knn)
-
-featureScores <- GeneSelection(X = t(trainDat), y = train.es$LnStatus, learningsets = splits, 
-    method = "limma")
-
-toplist(featureScores)
-
-seliter <- numeric()
-for (i in 1:nfold) seliter <- c(seliter, toplist(featureScores, iter = i, top = 10, 
-    show = FALSE)$index)
-sort(table(seliter), dec = T)  # summarize
-
-bestprobes <- as.numeric(names(sort(table(seliter), dec = T)))[1:20]
-
-fData(dat)[bestprobes, c("Gene Symbol", "Gene Title", "ENTREZ_GENE_ID", "Representative Public ID")]
-
-m <- matrix(which(dat$Set == "patient type: training set"), 1)
-
-full.learningset <- new("learningsets", learnmatrix = m, method = "my own", 
-    ntrain = 96, iter = 1)
-
-fullFeatureScores <- GeneSelection(X = t(exprs(dat)), learningsets = full.learningset, 
-    y = dat$LnStatus, method = "t.test")
-
-testclassif <- classification(X = t(exprs(dat)), y = dat$LnStatus, learningsets = full.learningset, 
-    genesel = fullFeatureScores, nbgene = 100, classifier = pknnCMA, k = 5)
-
-tres <- testclassif[[1]]
-ftable(tres)
-roc(tres)
-```
