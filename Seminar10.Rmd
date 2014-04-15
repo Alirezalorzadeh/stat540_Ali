@@ -1,0 +1,233 @@
+Seminar 10
+========================================================
+
+```{r}
+source("http://bioconductor.org/biocLite.R")
+biocLite("GEOquery")
+biocLite("CMA")
+
+install.packages("ROCR")
+
+library(MASS)
+library(reshape)
+library(car)
+library(limma)
+library(e1071)
+library(glmnet)
+library(ROCR)
+library(CMA)
+library(GEOquery)
+library(lattic
+        
+        
+```
+
+```{r}
+if (file.exists("class_LNstatus.Rdata")) {
+
+    load("class_LNstatus.Rdata")
+} else {
+
+    datgeo <- getGEO("GSE23177", GSEMatrix = TRUE)
+    dat <- datgeo[[1]] 
+    
+    str(pData(dat), max.level = 0)
+
+    pData(dat) <- subset(pData(dat), select = c("characteristics_ch1.2", "characteristics_ch1.3", 
+        "characteristics_ch1"))
+    names(pData(dat)) <- c("LnStatus", "LnRatio", "Set")
+
+    train.es <- dat[, dat$Set == "patient type: training set"]
+    test.es <- dat[, dat$Set != "patient type: training set"]
+    
+    pData(train.es)$LnStatus <- recode(pData(train.es)$LnStatus, "levels(pData(train.es)$LnStatus)[1]='neg'; else='pos'", 
+        levels = c("neg", "pos"))
+    
+    pData(test.es)$LnStatus <- recode(pData(test.es)$LnStatus, "levels(pData(test.es)$LnStatus)[1]='neg'; else='pos'", 
+        levels = c("neg", "pos"))
+
+    trainDat <- exprs(train.es)
+    testDat <- exprs(test.es)
+
+    ntrain <- dim(pData(train.es))[1]
+    ntest <- dim(pData(test.es))[1]
+    
+    pData(train.es)$LnRatio <- as.numeric(unlist(strsplit(as.vector(unlist(pData(train.es)$LnRatio)), 
+        ":", fixed = TRUE))[(1:ntrain) * 2])
+    pData(test.es)$LnRatio <- as.numeric(unlist(strsplit(as.vector(unlist(pData(test.es)$LnRatio)), 
+        ":", fixed = TRUE))[(1:ntest) * 2])
+
+    save(dat, trainDat, testDat, train.es, test.es, file = "class_LNstatus.Rdata")
+}
+```
+
+```{r}
+table(pData(train.es)$LnStatus)
+
+table(pData(test.es)$LnStatus)
+
+tapply(pData(train.es)$LnRatio, pData(train.es)$LnStatus, summary)
+
+tapply(pData(test.es)$LnRatio, pData(test.es)$LnStatus, summary)
+
+```
+
+```{r}
+set.seed(1234)
+(getMe <- sample(1:nrow(train.es), size = 3))
+
+trDat <- trainDat[getMe, ]
+
+trDat <- data.frame(LnStatus = pData(train.es)$LnStatus, Set = rep("train", 
+    nrow(pData(train.es))), t(trDat))
+```
+
+```{r}
+plotDat.train <- melt(trDat, id = c("LnStatus", "Set"), variable_name = "gene")
+colnames(plotDat.train)[colnames(plotDat.train) == "value"] = "gExp"
+tDat <- testDat[getMe, ]
+tDat <- data.frame(LnStatus = pData(test.es)$LnStatus, Set = rep("test", nrow(pData(test.es))), 
+    t(tDat))
+```
+
+```{r}
+plotDat.test <- melt(tDat, id = c("LnStatus", "Set"), variable_name = "gene")
+colnames(plotDat.test)[colnames(plotDat.test) == "value"] = "gExp"
+plotDat <- rbind(plotDat.train, plotDat.test)
+stripplot(gExp ~ LnStatus | gene + Set, plotDat, grid = TRUE, group = LnStatus, 
+    auto.key = TRUE, jitter.data = TRUE)
+```
+
+
+```{r}
+nfold <- 6
+tabTrain <- table(train.es$LnStatus)
+indlist <- sapply(names(tabTrain), function(z) which(train.es$LnStatus == z), 
+    simplify = FALSE)
+fold.pos <- matrix(sample(indlist[["pos"]]), nrow = nfold)
+fold.neg <- matrix(sample(indlist[["neg"]]), nrow = nfold)
+splits <- GenerateLearningsets(y = train.es$LnStatus, method = "CV", fold = 6, 
+    strat = TRUE)
+```
+
+```{r}
+ngenes <- 50
+nmethod <- 7 
+pr.err <- matrix(-1, nfold, nmethod, dimnames = list(paste0("Fold", 1:nfold), 
+    c("1NN", "5NN", "10NN", "15NN", "LDA", "Logit", "SVM")))
+
+for (i in 1:nfold) {
+    testdat.fold <- trainDat[, c(fold.pos[i, ], fold.neg[i, ])]
+ 
+    testclass.fold <- train.es$LnStatus[c(fold.pos[i, ], fold.neg[i, ])]
+    
+    traindat.fold <- trainDat[, -c(fold.pos[i, ], fold.neg[i, ])]
+    trainclass.fold <- train.es$LnStatus[-c(fold.pos[i, ], fold.neg[i, ])]
+    
+    limma.dat <- as.data.frame(traindat.fold)
+    desMat <- model.matrix(~trainclass.fold, limma.dat)  #design matrix
+    trainFit <- lmFit(limma.dat, desMat)
+    eBtrainFit <- eBayes(trainFit)
+
+    top.fold <- topTable(eBtrainFit, coef = which(colnames(coef(trainFit)) != 
+        "(Intercept)"), n = ngenes, sort.by = "P")
+
+    traindat.fold <- traindat.fold[rownames(top.fold), ]
+    testdat.fold <- testdat.fold[rownames(top.fold), ]
+
+    l <- 0
+
+    for (kk in c(1, 5, 10, 15)) {
+
+        l <- l + 1
+        
+
+        yhat.knn <- knn(train = t(traindat.fold), test = t(testdat.fold), cl = trainclass.fold, 
+            k = kk)
+
+        pr.err[i, l] <- mean(testclass.fold != yhat.knn)
+    }  
+    
+    m.lda <- lda(x = t(traindat.fold), group = trainclass.fold, prior = c(0.5, 
+        0.5))
+    yhat.lda <- predict(m.lda, newdata = t(testdat.fold))$class
+    pr.err[i, "LDA"] <- mean(testclass.fold != yhat.lda)
+    
+
+    glm.dat <- data.frame(t(traindat.fold), group = trainclass.fold)
+    m.log <- glm(group ~ ., data = glm.dat, family = binomial)
+    
+    pr.log <- predict(m.log, newdata = data.frame(t(testdat.fold)), type = "response")
+    pr.cl <- rep(0, length(testclass.fold))
+    pr.cl[pr.log > 1/2] <- "pos"
+    pr.cl[pr.log <= 1/2] <- "neg"
+    
+    pr.cl <- factor(pr.cl)
+    pr.err[i, "Logit"] <- mean(pr.cl != testclass.fold)
+
+    m.svm <- svm(x = t(traindat.fold), y = trainclass.fold, cost = 1, type = "C-classification", 
+        kernel = "linear")
+    pr.svm <- predict(m.svm, newdata = t(testdat.fold))
+    
+    pr.err[i, "SVM"] <- mean(pr.svm != testclass.fold)
+} 
+```
+
+```{r}
+cv.err <- colMeans(pr.err)
+
+ls <- cv.err - apply(pr.err, 2, sd)
+
+us <- cv.err + apply(pr.err, 2, sd)
+
+plot(1:nmethod, cv.err, ylim = c(0, 1), xlim = c(1, (nmethod + 0.5)), type = "n", 
+    axes = FALSE, xlab = "Classifier", ylab = "Error rate", main = "6-fold CV Error")
+
+for (j in 1:ncol(pr.err)) points(jitter(rep(j, 6), factor = 2), jitter(pr.err[, 
+    j]), cex = 0.8, pch = "X", col = "gray")
+
+for (i in 1:nmethod) lines(c(i, i), c(ls[i], us[i]), lwd = 2, col = "gray")
+points(1:nmethod, ls, pch = 19, col = "red")
+points(1:nmethod, us, pch = 19, col = "green")
+points(1:nmethod, cv.err, pch = 19, cex = 1.5, col = "black")
+axis(2, ylab = "Error rate")
+axis(1, 1:nmethod, colnames(pr.err))
+
+box()
+```
+
+```{r}
+yhat.knn <- knn(train = t(trainDat), test = t(testDat), cl = train.es$LnStatus, 
+    k = 10)
+
+pr.errTest <- mean(test.es$LnStatus != yhat.knn)
+
+featureScores <- GeneSelection(X = t(trainDat), y = train.es$LnStatus, learningsets = splits, 
+    method = "limma")
+
+toplist(featureScores)
+
+seliter <- numeric()
+for (i in 1:nfold) seliter <- c(seliter, toplist(featureScores, iter = i, top = 10, 
+    show = FALSE)$index)
+sort(table(seliter), dec = T)  # summarize
+
+bestprobes <- as.numeric(names(sort(table(seliter), dec = T)))[1:20]
+
+fData(dat)[bestprobes, c("Gene Symbol", "Gene Title", "ENTREZ_GENE_ID", "Representative Public ID")]
+
+m <- matrix(which(dat$Set == "patient type: training set"), 1)
+
+full.learningset <- new("learningsets", learnmatrix = m, method = "my own", 
+    ntrain = 96, iter = 1)
+
+fullFeatureScores <- GeneSelection(X = t(exprs(dat)), learningsets = full.learningset, 
+    y = dat$LnStatus, method = "t.test")
+
+testclassif <- classification(X = t(exprs(dat)), y = dat$LnStatus, learningsets = full.learningset, 
+    genesel = fullFeatureScores, nbgene = 100, classifier = pknnCMA, k = 5)
+
+tres <- testclassif[[1]]
+ftable(tres)
+roc(tres)
+```
